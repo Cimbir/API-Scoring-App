@@ -2,18 +2,11 @@ package com.scoring.core.scoring.service.category;
 
 import com.scoring.core.scoring.config.ScoringConfig;
 import com.scoring.core.scoring.model.CategoryScore;
-import com.scoring.core.scoring.model.CategoryScoreData;
-import com.scoring.core.scoring.model.category.description.DocumentationStats;
+import com.scoring.core.scoring.model.category.DescriptionData;
 import io.swagger.v3.oas.models.OpenAPI;
-import io.swagger.v3.oas.models.Operation;
-import io.swagger.v3.oas.models.PathItem;
-import io.swagger.v3.oas.models.parameters.Parameter;
-import io.swagger.v3.oas.models.responses.ApiResponse;
 import org.springframework.stereotype.Service;
 
-import java.util.Map;
-
-// TODO: Add schema descriptions too
+import static com.scoring.core.scoring.service.APIParserHelper.*;
 
 @Service
 public class DescriptionScoringService implements CategoryScoringService {
@@ -26,24 +19,32 @@ public class DescriptionScoringService implements CategoryScoringService {
     @Override
     public CategoryScore scoreCategory(OpenAPI spec) {
         int maxPoints = scoringConfig.getWeights().getDescriptionsAndDocumentation();
-        CategoryScoreData data = new CategoryScoreData();
+        DescriptionData data = new DescriptionData();
+        data.setPoints(maxPoints);
+        data.setSpec(spec);
 
-        DocumentationStats stats = analyzeDocumentation(spec, data);
+        analyzeDocumentation(spec, data);
 
-        if (stats.totalElements() > 0) {
-            double descriptionScore = 1.0 - ((double) stats.missingDescriptions() / stats.totalElements());
-            data.setPoints((int) (maxPoints * descriptionScore));
+        summarize(data);
+
+        return data.buildScore(maxPoints, "Descriptions & Documentation");
+    }
+
+    private void summarize(DescriptionData data) {
+        if (data.getTotalElements() > 0) {
+            double descriptionScore = 1.0 - ((double) data.getMissingDescriptions() / data.getTotalElements());
+            data.setPoints((int) (data.getPoints() * descriptionScore));
 
             // Add summary issue if there are missing descriptions
-            if (stats.missingDescriptions() > 0) {
-                CategoryScore.Severity overallSeverity = stats.missingDescriptions() > stats.totalElements() * 0.5 ?
+            if (data.getMissingDescriptions() > 0) {
+                CategoryScore.Severity overallSeverity = data.getMissingDescriptions() > data.getTotalElements() * 0.5 ?
                         CategoryScore.Severity.HIGH : CategoryScore.Severity.MEDIUM;
 
                 data.getIssues().add(CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location("overall", "all", "documentation"))
+                        .location("#")
                         .description(String.format("Documentation coverage issues: %d out of %d elements missing descriptions (%.1f%%)",
-                                stats.missingDescriptions(), stats.totalElements(),
-                                (double) stats.missingDescriptions() / stats.totalElements() * 100))
+                                data.getMissingDescriptions(), data.getTotalElements(),
+                                (double) data.getMissingDescriptions() / data.getTotalElements() * 100))
                         .severity(overallSeverity)
                         .suggestion("Add meaningful descriptions to all API elements for better developer experience")
                         .build());
@@ -52,59 +53,39 @@ public class DescriptionScoringService implements CategoryScoringService {
             }
 
             // Add specific strengths based on coverage
-            if (stats.operationsWithDescriptions() == stats.totalOperations() && stats.totalOperations() > 0) {
+            if (data.getOperationsWithDescriptions() == data.getTotalOperations() && data.getTotalOperations() > 0) {
                 data.getStrengths().add("All operations have descriptions");
             }
-            if (stats.parametersWithDescriptions() == stats.totalParameters() && stats.totalParameters() > 0) {
+            if (data.getParametersWithDescriptions() == data.getTotalParameters() && data.getTotalParameters() > 0) {
                 data.getStrengths().add("All parameters have descriptions");
             }
-            if (stats.responsesWithDescriptions() == stats.totalResponses() && stats.totalResponses() > 0) {
+            if (data.getResponsesWithDescriptions() == data.getTotalResponses() && data.getTotalResponses() > 0) {
                 data.getStrengths().add("All responses have descriptions");
             }
-            if (stats.requestBodiesWithDescriptions() == stats.totalRequestBodies() && stats.totalRequestBodies() > 0) {
+            if (data.getRequestBodiesWithDescriptions() == data.getTotalRequestBodies() && data.getTotalRequestBodies() > 0) {
                 data.getStrengths().add("All request bodies have descriptions");
             }
 
         } else {
             data.setPoints(0);
             data.getIssues().add(CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("paths", "none", "root"))
+                    .location("#/paths")
                     .description("No API operations found to evaluate")
                     .severity(CategoryScore.Severity.HIGH)
                     .suggestion("Define API paths and operations with proper documentation")
                     .build());
         }
-
-        return CategoryScore.builder()
-                .maxScore(maxPoints)
-                .score(Math.max(0, data.getPoints()))
-                .categoryName("Descriptions & Documentation")
-                .issues(data.getIssues())
-                .strengths(data.getStrengths())
-                .build();
     }
 
-    private DocumentationStats analyzeDocumentation(OpenAPI spec, CategoryScoreData data) {
-        int totalElements = 0;
-        int missingDescriptions = 0;
-        int totalPaths = 0;
-        int pathsWithDescriptions = 0;
-        int totalOperations = 0;
-        int operationsWithDescriptions = 0;
-        int totalParameters = 0;
-        int parametersWithDescriptions = 0;
-        int totalResponses = 0;
-        int responsesWithDescriptions = 0;
-        int totalRequestBodies = 0;
-        int requestBodiesWithDescriptions = 0;
-
+    private void analyzeDocumentation(OpenAPI spec, DescriptionData data) {
         // Check API-level description
         if (spec.getInfo() != null) {
-            totalElements++;
-            if (isInvalidDescription(spec.getInfo().getDescription())) {
-                missingDescriptions++;
+            data.setTotalElements(data.getTotalElements() + 1);
+            if(scoringConfig.getValidation().getDescription().isRequireGeneralDescription() &&
+                isInvalidDescription(spec.getInfo().getDescription())) {
+                data.setMissingDescriptions(data.getMissingDescriptions() + 1);
                 data.getIssues().add(CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location("", "", "info"))
+                        .location("#/info")
                         .description("API info lacks description")
                         .severity(CategoryScore.Severity.MEDIUM)
                         .suggestion("Add a clear description of what your API does in the info section")
@@ -112,132 +93,110 @@ public class DescriptionScoringService implements CategoryScoringService {
             }
         }
 
-        if (spec.getPaths() != null) {
-            for (Map.Entry<String, PathItem> pathEntry : spec.getPaths().entrySet()) {
-                String path = pathEntry.getKey();
-                PathItem pathItem = pathEntry.getValue();
-
-                // TODO: Maybe also check summary?
-                totalElements++;
-                totalPaths++;
-                if(isInvalidDescription(pathItem.getDescription())) {
-                    missingDescriptions++;
-                    data.getIssues().add(CategoryScore.Issue.builder()
-                            .location(new CategoryScore.Issue.Location(path, "", "path"))
-                            .description("Path '" + path + "' lacks description")
-                            .severity(CategoryScore.Severity.MEDIUM)
-                            .suggestion("Add a description explaining what this path does")
-                            .build());
-                }else{
-                    pathsWithDescriptions++;
+        // Check operations
+        if(scoringConfig.getValidation().getDescription().isRequireOperationDescriptions()){
+            goOverOperations(spec, (path, operationId, operation, d) -> {
+                d.setTotalElements(d.getTotalElements() + 1);
+                d.setTotalOperations(d.getTotalOperations() + 1);
+                if (isInvalidDescription(operation.getDescription()) && isInvalidDescription(operation.getSummary())) {
+                    d.setMissingDescriptions(d.getMissingDescriptions() + 1);
+                    data.getIssues().add(
+                            CategoryScore.Issue.builder()
+                                    .location(String.format("#/paths/%s/operations/%s", path, operationId))
+                                    .description(String.format("Operation '%s' on path '%s' lacks description", operationId, path))
+                                    .severity(CategoryScore.Severity.MEDIUM)
+                                    .suggestion("Add a description or summary explaining what this operation does")
+                                    .build());
+                } else {
+                    d.setOperationsWithDescriptions(d.getOperationsWithDescriptions() + 1);
                 }
-
-                for (Map.Entry<PathItem.HttpMethod, Operation> operationEntry : pathItem.readOperationsMap().entrySet()) {
-                    PathItem.HttpMethod method = operationEntry.getKey();
-                    Operation operation = operationEntry.getValue();
-                    String operationId = operation.getOperationId() != null ? operation.getOperationId() : method.toString();
-
-                    // Check operation description
-                    if (
-                            scoringConfig.getValidation().getDescription().isRequireOperationDescriptions()
-                    ){
-                        totalElements++;
-                        totalOperations++;
-                        if (isInvalidDescription(operation.getDescription()) && isInvalidDescription(operation.getSummary())) {
-                            missingDescriptions++;
-                            data.getIssues().add(
-                                    CategoryScore.Issue.builder()
-                                            .location(new CategoryScore.Issue.Location(path, operationId, "operation"))
-                                            .description(String.format("Operation '%s' on path '%s' lacks description", operationId, path))
-                                            .severity(CategoryScore.Severity.MEDIUM)
-                                            .suggestion("Add a description or summary explaining what this operation does")
-                                            .build());
-                        } else {
-                            operationsWithDescriptions++;
-                        }
-                    }
-
-                    // Check parameters
-                    if (
-                            operation.getParameters() != null &&
-                            scoringConfig.getValidation().getDescription().isRequireParameterDescriptions()
-                    ) {
-                        for (Parameter param : operation.getParameters()) {
-                            totalElements++;
-                            totalParameters++;
-                            if (isInvalidDescription(param.getDescription())) {
-                                missingDescriptions++;
-                                data.getIssues().add(
-                                        CategoryScore.Issue.builder()
-                                        .location(new CategoryScore.Issue.Location(path, operationId, "parameter/" + param.getName()))
-                                        .description(String.format("Parameter '%s' in operation '%s' on path '%s' lacks description", param.getName(), operationId, path))
-                                        .severity(CategoryScore.Severity.LOW)
-                                        .suggestion(String.format("Add a description explaining the purpose and expected format of parameter '%s'", param.getName()))
-                                        .build());
-                            } else {
-                                parametersWithDescriptions++;
-                            }
-                        }
-                    }
-
-                    // Check request body
-                    if (
-                            operation.getRequestBody() != null &&
-                            scoringConfig.getValidation().getDescription().isRequireRequestBodyDescriptions()
-                    ) {
-                        totalElements++;
-                        totalRequestBodies++;
-                        if (isInvalidDescription(operation.getRequestBody().getDescription())) {
-                            missingDescriptions++;
-                            data.getIssues().add(
-                                    CategoryScore.Issue.builder()
-                                            .location(new CategoryScore.Issue.Location(path, operationId, "requestBody"))
-                                            .description(String.format("Request body in operation '%s' on path '%s' lacks description", operationId, path))
-                                            .severity(CategoryScore.Severity.LOW)
-                                            .suggestion("Add a description explaining the expected request body structure and purpose")
-                                            .build());
-                        } else {
-                            requestBodiesWithDescriptions++;
-                        }
-                    }
-
-                    // Check responses
-                    if (
-                            operation.getResponses() != null &&
-                            scoringConfig.getValidation().getDescription().isRequireResponseDescriptions()
-                    ) {
-                        for (Map.Entry<String, ApiResponse> responseEntry : operation.getResponses().entrySet()) {
-                            String responseCode = responseEntry.getKey();
-                            ApiResponse response = responseEntry.getValue();
-
-                            totalElements++;
-                            totalResponses++;
-                            if (isInvalidDescription(response.getDescription())) {
-                                missingDescriptions++;
-                                data.getIssues().add(
-                                        CategoryScore.Issue.builder()
-                                                .location(new CategoryScore.Issue.Location(path, operationId, "responses/" + responseCode))
-                                                .description(String.format("Response '%s' lacks description", responseCode))
-                                                .severity(CategoryScore.Severity.LOW)
-                                                .suggestion("Add a description explaining what this response means and when it occurs")
-                                                .build());
-                            } else {
-                                responsesWithDescriptions++;
-                            }
-                        }
-                    }
-                }
-            }
+            }, data);
         }
 
-        return new DocumentationStats(
-                totalElements, missingDescriptions,
-                totalPaths, pathsWithDescriptions,
-                totalOperations, operationsWithDescriptions,
-                totalParameters, parametersWithDescriptions,
-                totalResponses, responsesWithDescriptions,
-                totalRequestBodies, requestBodiesWithDescriptions
-        );
+        // Check parameters
+        if(scoringConfig.getValidation().getDescription().isRequireParameterDescriptions()){
+            goOverParameters(spec, (path, operationId, parameter, d) -> {
+                d.setTotalResponses(d.getTotalResponses() + 1);
+                d.setTotalParameters(d.getTotalParameters() + 1);
+                if (isInvalidDescription(parameter.getDescription()) &&
+                        doesReferenceExist(d.getSpec(), parameter.get$ref())) {
+                    d.setMissingDescriptions(d.getMissingDescriptions() + 1);
+                    d.getIssues().add(
+                            CategoryScore.Issue.builder()
+                                    .location(String.format("#/paths/%s/operations/%s/parameters/%s", path, operationId, parameter.getName()))
+                                    .description(String.format("Parameter '%s' in operation '%s' on path '%s' lacks description", parameter.getName(), operationId, path))
+                                    .severity(CategoryScore.Severity.LOW)
+                                    .suggestion(String.format("Add a description explaining the purpose and expected format of parameter '%s'", parameter.getName()))
+                                    .build());
+                } else {
+                    d.setParametersWithDescriptions(d.getParametersWithDescriptions() + 1);
+                }
+            }, data);
+        }
+
+        // Check request body
+        if(scoringConfig.getValidation().getDescription().isRequireRequestDescriptions()){
+            goOverOperations(spec, (path, operationId, operation, d) -> {
+                if (operation.getRequestBody() != null) {
+                    d.setTotalParameters(d.getTotalParameters() + 1);
+                    d.setTotalRequestBodies(d.getTotalRequestBodies() + 1);
+                    if (isInvalidDescription(operation.getRequestBody().getDescription())) {
+                        d.setMissingDescriptions(d.getMissingDescriptions() + 1);
+                        d.getIssues().add(
+                                CategoryScore.Issue.builder()
+                                        .location(String.format("#/paths/%s/operations/%s/requestBody", path, operationId))
+                                        .description(String.format("Request body in operation '%s' on path '%s' lacks description", operationId, path))
+                                        .severity(CategoryScore.Severity.LOW)
+                                        .suggestion("Add a description explaining the expected request body structure and purpose")
+                                        .build());
+                    } else {
+                        d.setRequestBodiesWithDescriptions(d.getRequestBodiesWithDescriptions() + 1);
+                    }
+                }
+            }, data);
+        }
+
+        // Check responses
+        if (scoringConfig.getValidation().getDescription().isRequireResponseDescriptions()) {
+            goOverResponses(spec, (path, operationId, responseCode, response, d) -> {
+                d.setTotalElements(d.getTotalElements() + 1);
+                d.setTotalResponses(d.getTotalResponses() + 1);
+                if (isInvalidDescription(response.getDescription()) &&
+                        doesReferenceExist(d.getSpec(), response.get$ref())) {
+                    d.setMissingDescriptions(d.getMissingDescriptions() + 1);
+                    d.getIssues().add(
+                            CategoryScore.Issue.builder()
+                                    .location(String.format("#/paths/%s/operations/%s/responses/%s", path, operationId, responseCode))
+                                    .description(String.format("Response '%s' lacks description", responseCode))
+                                    .severity(CategoryScore.Severity.LOW)
+                                    .suggestion("Add a description explaining what this response means and when it occurs")
+                                    .build());
+                } else {
+                    d.setResponsesWithDescriptions(d.getResponsesWithDescriptions() + 1);
+                }
+            }, data);
+        }
+
+        // Check schemas
+        if(scoringConfig.getValidation().getDescription().isRequireSchemaDescriptions()){
+            goOverSchemas(spec, (schemaName, schema, d) -> {
+                d.setTotalElements(d.getTotalElements() + 1);
+                d.setTotalSchemas(d.getTotalSchemas() + 1);
+                if (isInvalidDescription(schema.getDescription()) &&
+                        doesReferenceExist(d.getSpec(), schema.get$ref())) {
+                    d.setMissingDescriptions(d.getMissingDescriptions() + 1);
+                    d.getIssues().add(
+                            CategoryScore.Issue.builder()
+                                    .location(String.format("#/components/schemas/%s", schemaName))
+                                    .description(String.format("Schema '%s' lacks description", schemaName))
+                                    .severity(CategoryScore.Severity.LOW)
+                                    .suggestion("Add a description explaining the purpose and structure of this schema")
+                                    .build());
+                } else {
+                    d.setSchemasWithDescriptions(d.getSchemasWithDescriptions() + 1);
+                }
+            }, data);
+        }
     }
 
     private boolean isInvalidDescription(String description) {

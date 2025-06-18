@@ -5,9 +5,7 @@ import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 @Getter
 @Setter
@@ -30,19 +28,6 @@ public class ScoringConfig {
      */
     private ValidationRules validation;
 
-    /**
-     * Parser configuration
-     */
-    private ParserConfig parser;
-
-    /**
-     * Output configuration
-     */
-    private OutputConfig output;
-
-    /**
-     * Category scoring weights
-     */
     @Setter
     @Getter
     public static class CategoryWeights {
@@ -53,6 +38,7 @@ public class ScoringConfig {
         private int examplesAndSamples;
         private int security;
         private int bestPractices;
+        private double categoryMinimumPercentage;
 
         public int getTotalWeight() {
             return schemaAndTypes + descriptionsAndDocumentation + pathsAndOperations +
@@ -71,8 +57,7 @@ public class ScoringConfig {
         private int good;
         private int fair;
         private int poor;
-
-        private double categoryMinimumPercentage;
+        private int veryPoor;
     }
 
     /**
@@ -95,7 +80,9 @@ public class ScoringConfig {
     @Getter
     public static class SchemaValidation {
         private boolean requireSchemaComponents;
-        private boolean allowGenericObjects;
+        private boolean requireRequestBodySchema;
+        private boolean requireResponseBodySchema;
+        private boolean allowedGenericSchema;
         private List<String> requiredDataTypes;
         private int penaltyForMissingSchema;
 
@@ -105,6 +92,7 @@ public class ScoringConfig {
     @Getter
     public static class DescriptionValidation {
         private int minimumDescriptionLength;
+        private boolean requireGeneralDescription;
         private boolean requireOperationDescriptions;
         private boolean requireParameterDescriptions;
         private boolean requireResponseDescriptions;
@@ -116,12 +104,13 @@ public class ScoringConfig {
     @Setter
     @Getter
     public static class PathValidation {
-        private List<String> allowedNamingConventions;
-        private int penaltyForNamingConventionMismatch;
+        private boolean enforceNamingConventions;
         private boolean enforceCrudOperationConventions;
-        private int penaltyForMissingCrudOperations;
         private boolean checkForRedundantPaths;
+        private List<String> allowedNamingConventions;
         private double pathSimilarityThreshold;
+        private int penaltyForNamingConventionMismatch;
+        private int penaltyForMissingCrudOperations;
         private int penaltyForRedundantPaths;
 
     }
@@ -131,9 +120,8 @@ public class ScoringConfig {
     public static class ResponseValidation {
         private boolean requireSuccessResponses;
         private boolean requireErrorResponses;
-        private List<String> requiredSuccessCodes;
-        private List<String> requiredErrorCodes;
         private boolean requireDefaultResponse;
+        private List<String> requiredErrorCodes;
 
     }
 
@@ -166,45 +154,8 @@ public class ScoringConfig {
         private boolean requireServersArray;
         private boolean requireTags;
         private boolean requireComponentReuse;
+        private boolean requireOperationIds;
         private int minimumReusableComponents;
-        private boolean requireContactInfo;
-        private boolean requireLicenseInfo;
-
     }
 
-    /**
-     * Parser configuration
-     */
-    @Setter
-    @Getter
-    public static class ParserConfig {
-        private int connectionTimeoutMs = 10000;
-        private int readTimeoutMs = 30000;
-        private boolean followRedirects = true;
-        private int maxRedirects = 5;
-        private Map<String, String> defaultHeaders = new HashMap<>();
-        private boolean validateSpec = true;
-        private boolean resolveReferences = true;
-
-        public ParserConfig() {
-            defaultHeaders.put("User-Agent", "OpenAPI-Scorer/1.0");
-            defaultHeaders.put("Accept", "application/json,application/yaml,text/yaml");
-        }
-
-    }
-
-    /**
-     * Output configuration
-     */
-    @Setter
-    @Getter
-    public static class OutputConfig {
-        private boolean includeRecommendations = true;
-        private boolean includeDetailedBreakdown = true;
-        private boolean includeProgressBars = true;
-        private String outputFormat = "console"; // console, json, html
-        private boolean saveReport = false;
-        private String reportDirectory = "./reports";
-
-    }
 }

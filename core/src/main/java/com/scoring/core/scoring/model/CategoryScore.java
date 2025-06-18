@@ -14,17 +14,11 @@ public record CategoryScore(
 ) {
     @Builder
     public record Issue(
-            Location location,
+            String location,
             String description,
             Severity severity,
             String suggestion
     ) {
-        public record Location(
-                String path,
-                String operation,
-                String location
-        ) {
-        }
     }
     public enum Severity {
         LOW,

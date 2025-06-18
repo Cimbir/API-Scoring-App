@@ -2,18 +2,14 @@ package com.scoring.core.scoring.service.category;
 
 import com.scoring.core.scoring.config.ScoringConfig;
 import com.scoring.core.scoring.model.CategoryScore;
-import com.scoring.core.scoring.model.CategoryScoreData;
+import com.scoring.core.scoring.model.category.SecurityData;
 import io.swagger.v3.oas.models.OpenAPI;
-import io.swagger.v3.oas.models.Operation;
-import io.swagger.v3.oas.models.PathItem;
-import io.swagger.v3.oas.models.security.SecurityRequirement;
-import io.swagger.v3.oas.models.security.SecurityScheme;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
+
+import static com.scoring.core.scoring.service.APIParserHelper.*;
 
 @Service
 public class SecurityScoringService implements CategoryScoringService {
@@ -26,8 +22,23 @@ public class SecurityScoringService implements CategoryScoringService {
     @Override
     public CategoryScore scoreCategory(OpenAPI spec) {
         int maxPoints = scoringConfig.getWeights().getSecurity();
-        CategoryScoreData data = new CategoryScoreData();
+        SecurityData data = new SecurityData();
+        data.setPoints(maxPoints);
+        if(spec.getComponents() != null && spec.getComponents().getSecuritySchemes() != null) {
+            data.setSecuritySchemes(spec.getComponents().getSecuritySchemes().keySet());
+        }
 
+        if(spec.getPaths() == null || spec.getPaths().isEmpty()) {
+            // No paths means no operations, hence no security checks needed
+            data.getIssues().add(CategoryScore.Issue.builder()
+                    .location("paths")
+                    .description("No paths defined in the OpenAPI spec")
+                    .severity(CategoryScore.Severity.HIGH)
+                    .suggestion("Add paths to the OpenAPI spec to enable security checks")
+                    .build());
+            data.setPoints(0);
+            return data.buildScore(maxPoints, "Security");
+        }
 
         // Check if security schemes are defined
         if(scoringConfig.getValidation().getSecurity().isRequireSecuritySchemes()) {
@@ -43,48 +54,38 @@ public class SecurityScoringService implements CategoryScoringService {
         if(scoringConfig.getValidation().getSecurity().isRequireGlobalSecurity()) {
             checkGlobalSecurity(spec, data);
         }
-        return CategoryScore.builder()
-                .categoryName("Security")
-                .score(Math.max(0, data.getPoints()))
-                .maxScore(maxPoints)
-                .issues(data.getIssues())
-                .strengths(data.getStrengths())
-                .build();
+
+        return data.buildScore(maxPoints, "Security");
     }
 
-    private void checkSecuritySchemes(OpenAPI spec, CategoryScoreData data) {
-        boolean hasSecuritySchemes = spec.getComponents() != null &&
-                spec.getComponents().getSecuritySchemes() != null &&
-                !spec.getComponents().getSecuritySchemes().isEmpty();
-
-        boolean hasIssues = false;
-
-        if (!hasSecuritySchemes) {
-            hasIssues = true;
+    private void checkSecuritySchemes(OpenAPI spec, SecurityData data) {
+        if (
+                spec.getComponents() == null ||
+                spec.getComponents().getSecuritySchemes() == null ||
+                spec.getComponents().getSecuritySchemes().isEmpty()
+        ) {
             data.setPoints(data.getPoints() - scoringConfig.getValidation().getSecurity().getPenaltyForWeakSecuritySchemes());
+            System.out.println("No security schemes defined in components");
 
             CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("", "", "components.securitySchemes"))
+                    .location("#/components/securitySchemes")
                     .description("No security schemes defined")
                     .severity(CategoryScore.Severity.HIGH)
                     .suggestion("Define security schemes in components section (e.g., Bearer token, API key, OAuth2)")
                     .build();
 
             data.getIssues().add(issue);
+            return;
         }
 
-        int totalSecuritySchemes = spec.getComponents().getSecuritySchemes().size();
-        int wrongTypeSchemes = 0;
-
-        for( String schemeName : spec.getComponents().getSecuritySchemes().keySet()) {
-            SecurityScheme scheme = spec.getComponents().getSecuritySchemes().get(schemeName);
+        goOverSecuritySchemes(spec, (schemeName, scheme, d) -> {
+            data.setTotalSecuritySchemes(data.getTotalSecuritySchemes() + 1);
             if (scheme == null || scheme.getType() == null ||
-                    scoringConfig.getValidation().getSecurity().getRecommendedSecurityTypes().contains(scheme.getType().toString())) {
-                wrongTypeSchemes++;
-                hasIssues = true;
+                    !scoringConfig.getValidation().getSecurity().getRecommendedSecurityTypes().contains(scheme.getType().toString())) {
+                d.setWrongSecuritySchemes(d.getWrongSecuritySchemes() + 1);
 
                 CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location("components.securitySchemes", schemeName, ""))
+                        .location(String.format("#/components.securitySchemes/%s", schemeName))
                         .description(
                                 String.format(
                                         "Security scheme '%s' is defined but not configured with the recommended type: %s",
@@ -97,60 +98,40 @@ public class SecurityScoringService implements CategoryScoringService {
 
                 data.getIssues().add(issue);
             }
-        }
+        }, data);
 
         int penalty = (int)(scoringConfig.getValidation().getSecurity().getPenaltyForWeakSecuritySchemes()
-                * (double) (wrongTypeSchemes) / totalSecuritySchemes);
-
+                * (double) (data.getWrongSecuritySchemes()) / data.getTotalSecuritySchemes());
         data.setPoints(data.getPoints() - penalty);
 
-        if(!hasIssues) {
+        if(data.getWrongSecuritySchemes() == 0) {
             data.getStrengths().add("Security schemes are defined");
         }
     }
 
-    private void checkOperationSecurity(OpenAPI spec, CategoryScoreData data) {
-        int totalOperationsSecurity = 0;
-        int wrongOperationSecurity = 0;
-
-        Set<String> securitySchemes = spec.getComponents().getSecuritySchemes().keySet();
-        Set<String> usedSchemes = new HashSet<>();
-
-        if (spec.getPaths() != null) {
-            for (String path : spec.getPaths().keySet()) {
-                PathItem pathItem = spec.getPaths().get(path);
-                for (Operation operation : pathItem.readOperations()) {
-                    String operationId = operation.getOperationId() != null ?
-                            operation.getOperationId() : "unknown";
-
-                    if(operation.getSecurity() != null) {
-                        for (SecurityRequirement securityRequirement : operation.getSecurity()) {
-                            for (String schemeName : securityRequirement.keySet()) {
-                                totalOperationsSecurity++;
-                                if (!securitySchemes.contains(schemeName)) {
-                                    wrongOperationSecurity++;
-                                    CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                                            .location(new CategoryScore.Issue.Location(path, operationId, "security"))
-                                            .description("Security scheme '" + schemeName + "' not defined in components")
-                                            .severity(CategoryScore.Severity.HIGH)
-                                            .suggestion("Define security scheme in components section")
-                                            .build();
-                                    data.getIssues().add(issue);
-                                } else {
-                                    usedSchemes.add(schemeName);
-                                }
-                            }
-                        }
-                    }
-                }
+    private void checkOperationSecurity(OpenAPI spec, SecurityData data) {
+        goOverOperationSecuritySchemes(spec, (path, operationId, schemeName, d) -> {
+            d.setTotalOperationsSecurity(d.getTotalOperationsSecurity() + 1);
+            if (!d.getSecuritySchemes().contains(schemeName)) {
+                d.setWrongOperationsSecurity(d.getWrongOperationsSecurity() + 1);
+                CategoryScore.Issue issue = CategoryScore.Issue.builder()
+                        .location(String.format("#/%s/%s/security", path, operationId))
+                        .description("Security scheme '" + schemeName + "' not defined in components")
+                        .severity(CategoryScore.Severity.HIGH)
+                        .suggestion("Define security scheme in components section")
+                        .build();
+                data.getIssues().add(issue);
+            } else {
+                d.getUsedSchemes().add(schemeName);
             }
-        }
+        }, data);
 
-        Set<String> leftoverSchemes = new HashSet<>(securitySchemes);
-        leftoverSchemes.removeAll(usedSchemes);
+        Set<String> leftoverSchemes = new HashSet<>(data.getSecuritySchemes());
+        leftoverSchemes.removeAll(data.getUsedSchemes());
+
         for(String scheme : leftoverSchemes) {
             CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("components.securitySchemes", scheme, ""))
+                    .location(String.format("#/components.securitySchemes/%s", scheme))
                     .description("Security scheme '" + scheme + "' defined but not used in any operation")
                     .severity(CategoryScore.Severity.LOW)
                     .suggestion("Consider removing unused security scheme or applying it to operations")
@@ -158,51 +139,38 @@ public class SecurityScoringService implements CategoryScoringService {
             data.getIssues().add(issue);
         }
 
-        if (totalOperationsSecurity > 0) {
+        if (data.getTotalOperationsSecurity() > 0) {
             int penalty = (int) (scoringConfig.getValidation().getSecurity().getPenaltyForWeakSecuritySchemes()
-                    * (double) wrongOperationSecurity / totalOperationsSecurity);
-
+                    * (double) data.getWrongOperationsSecurity() / data.getTotalOperationsSecurity());
             data.setPoints(data.getPoints() - penalty);
 
-            if (wrongOperationSecurity == 0) {
+            if (data.getWrongOperationsSecurity() == 0) {
                 data.getStrengths().add("All operations have valid security requirements");
             }
         }
     }
 
-    private void checkGlobalSecurity(OpenAPI spec, CategoryScoreData data) {
-        int totalGlobalSecurity = 0;
-        int wrongGlobalSecurity = 0;
+    private void checkGlobalSecurity(OpenAPI spec, SecurityData data) {
+        goOverGlobalSecuritySchemes(spec, (schemeName, T) -> {
+            data.setTotalGlobalSecurity(data.getTotalGlobalSecurity() + 1);
+            if (!data.getSecuritySchemes().contains(schemeName)) {
+                data.setWrongGlobalSecurity(data.getWrongGlobalSecurity() + 1);
 
-        Set<String> securitySchemes = spec.getComponents().getSecuritySchemes().keySet();
+                CategoryScore.Issue issue = CategoryScore.Issue.builder()
+                        .location(String.format("#/security/%s", schemeName))
+                        .description("Global security requirement '" + schemeName + "' not defined in components")
+                        .severity(CategoryScore.Severity.HIGH)
+                        .suggestion("Define security scheme in components section")
+                        .build();
 
-        boolean hasSecurityRequirements = spec.getSecurity() != null && !spec.getSecurity().isEmpty();
-
-        if (hasSecurityRequirements) {
-            for (SecurityRequirement securityRequirement : spec.getSecurity()) {
-                for (String schemeName : securityRequirement.keySet()) {
-                    totalGlobalSecurity++;
-                    if (!securitySchemes.contains(schemeName)) {
-                        wrongGlobalSecurity++;
-
-                        CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                                .location(new CategoryScore.Issue.Location("security", schemeName, ""))
-                                .description("Global security requirement '" + schemeName + "' not defined in components")
-                                .severity(CategoryScore.Severity.HIGH)
-                                .suggestion("Define security scheme in components section")
-                                .build();
-
-                        data.getIssues().add(issue);
-                    }
-                }
+                data.getIssues().add(issue);
             }
-        }
+        }, data);
 
-        if (!hasSecurityRequirements) {
+        if (spec.getSecurity() == null || spec.getSecurity().isEmpty()) {
             data.setPoints(data.getPoints() - scoringConfig.getValidation().getSecurity().getPenaltyForWeakGlobalSecurity());
-
             CategoryScore.Issue issue = CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("", "", "security"))
+                    .location("security")
                     .description("No global security requirements defined")
                     .severity(CategoryScore.Severity.HIGH)
                     .suggestion("Define global security requirements in the OpenAPI spec")
@@ -210,13 +178,12 @@ public class SecurityScoringService implements CategoryScoringService {
 
             data.getIssues().add(issue);
         }else{
-            if(wrongGlobalSecurity == 0) {
+            if(data.getWrongGlobalSecurity() == 0) {
                 data.getStrengths().add("Global security requirements are defined");
             }else{
                 int penalty = (int) (scoringConfig.getValidation().getSecurity().getPenaltyForWeakGlobalSecurity()
-                        * (double) wrongGlobalSecurity / totalGlobalSecurity);
-
-                data.setPoints(data.getPoints() - wrongGlobalSecurity);
+                        * (double) data.getWrongGlobalSecurity() / data.getTotalGlobalSecurity());
+                data.setPoints(data.getPoints() - penalty);
             }
         }
     }

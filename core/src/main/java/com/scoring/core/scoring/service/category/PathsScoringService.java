@@ -2,18 +2,13 @@ package com.scoring.core.scoring.service.category;
 
 import com.scoring.core.scoring.config.ScoringConfig;
 import com.scoring.core.scoring.model.CategoryScore;
-import com.scoring.core.scoring.model.CategoryScoreData;
-import com.scoring.core.scoring.model.category.path.CrudAnalysis;
-import com.scoring.core.scoring.model.category.path.NamingAnalysis;
-import com.scoring.core.scoring.model.category.path.OverlapAnalysis;
+import com.scoring.core.scoring.model.category.PathsData;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.regex.Pattern;
-
-// TODO: path similarity threshold configuration
 
 @Service
 public class PathsScoringService implements CategoryScoringService {
@@ -31,72 +26,43 @@ public class PathsScoringService implements CategoryScoringService {
     @Override
     public CategoryScore scoreCategory(OpenAPI spec) {
         int maxPoints = scoringConfig.getWeights().getPathsAndOperations();
-        CategoryScoreData data = new CategoryScoreData();
+        PathsData data = new PathsData();
+        data.setPoints(maxPoints);
 
         if (spec.getPaths() == null || spec.getPaths().isEmpty()) {
             data.getIssues().add(CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("paths", "none", "root"))
+                    .location("#/paths")
                     .description("No paths defined in the API specification")
                     .severity(CategoryScore.Severity.HIGH)
                     .suggestion("Define API paths and operations to create a functional API")
                     .build());
 
-            return CategoryScore.builder()
-                    .maxScore(maxPoints)
-                    .score(0)
-                    .categoryName("Paths & Operations")
-                    .issues(data.getIssues())
-                    .strengths(data.getStrengths())
-                    .build();
+            data.setPoints(0);
+            return data.buildScore(maxPoints, "Paths & Operations");
         }
 
-        List<String> pathNames = new ArrayList<>(spec.getPaths().keySet());
+        data.setPathNames(new ArrayList<>(spec.getPaths().keySet()));
 
         // Check for consistent naming (5 points)
-        NamingAnalysis namingAnalysis = analyzeNamingConsistency(pathNames, data);
-        if (!namingAnalysis.isConsistent()) {
-            data.setPoints(data.getPoints() - scoringConfig.getValidation().getPath().getPenaltyForNamingConventionMismatch());
-        } else {
-            data.getStrengths().add("Consistent path naming conventions (" + namingAnalysis.detectedPattern() + ")");
-        }
+        if(scoringConfig.getValidation().getPath().isEnforceNamingConventions()) analyzeNamingConsistency(data);
 
         // Check for CRUD operations (5 points)
-        CrudAnalysis crudAnalysis = analyzeCrudOperations(spec, data);
-        if (!crudAnalysis.hasProperCrud()) {
-            data.setPoints(data.getPoints() - scoringConfig.getValidation().getPath().getPenaltyForMissingCrudOperations());
-        } else {
-            data.getStrengths().add("Proper CRUD operations implemented");
-        }
+        if(scoringConfig.getValidation().getPath().isEnforceCrudOperationConventions()) analyzeCrudOperations(spec, data);
 
         // Check for overlapping paths (5 points)
-        OverlapAnalysis overlapAnalysis = analyzeOverlappingPaths(pathNames, data);
-        if (scoringConfig.getValidation().getPath().isCheckForRedundantPaths()) {
-            if (overlapAnalysis.hasOverlaps()) {
-                data.setPoints(data.getPoints() - scoringConfig.getValidation().getPath().getPenaltyForRedundantPaths());
-            } else {
-                data.getStrengths().add("No overlapping or redundant paths detected");
-            }
-        }
+        if(scoringConfig.getValidation().getPath().isCheckForRedundantPaths()) analyzeOverlappingPaths(data);
 
-        return CategoryScore.builder()
-                .maxScore(maxPoints)
-                .score(Math.max(0, data.getPoints()))
-                .categoryName("Paths & Operations")
-                .issues(data.getIssues())
-                .strengths(data.getStrengths())
-                .build();
+        return data.buildScore(maxPoints, "Paths & Operations");
     }
 
-    private NamingAnalysis analyzeNamingConsistency(List<String> pathNames, CategoryScoreData data) {
-        if (pathNames.isEmpty()) {
-            return new NamingAnalysis(true, "none");
-        }
+    private void analyzeNamingConsistency(PathsData data) {
+        if (data.getPathNames().isEmpty()) return;
 
         Map<String, Integer> patternCounts = new HashMap<>();
         List<String> inconsistentPaths = new ArrayList<>();
 
         // Determine naming patterns for each path segment
-        for (String path : pathNames) {
+        for (String path : data.getPathNames()) {
             String[] segments = path.split("/");
             for (String segment : segments) {
                 if (segment.isEmpty() || segment.startsWith("{")) continue; // Skip empty and parameter segments
@@ -113,7 +79,7 @@ public class PathsScoringService implements CategoryScoringService {
                 .orElse("unknown");
 
         // Check for inconsistencies
-        for (String path : pathNames) {
+        for (String path : data.getPathNames()) {
             String[] segments = path.split("/");
             for (String segment : segments) {
                 if (segment.isEmpty() || segment.startsWith("{")) continue;
@@ -130,7 +96,7 @@ public class PathsScoringService implements CategoryScoringService {
         if (!inconsistentPaths.isEmpty()) {
             for (String path : inconsistentPaths) {
                 data.getIssues().add(CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location(path, "all", "naming"))
+                        .location(String.format("#/paths/%s", path))
                         .description("Path uses inconsistent naming convention")
                         .severity(CategoryScore.Severity.LOW)
                         .suggestion("Use consistent naming convention across all paths (detected dominant pattern: " + dominantPattern + ")")
@@ -139,7 +105,7 @@ public class PathsScoringService implements CategoryScoringService {
 
             // Add summary issue
             data.getIssues().add(CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("overall", "all", "naming"))
+                    .location("#/paths")
                     .description(String.format("Inconsistent path naming: %d paths don't follow the dominant %s pattern",
                             inconsistentPaths.size(), dominantPattern))
                     .severity(CategoryScore.Severity.MEDIUM)
@@ -147,10 +113,20 @@ public class PathsScoringService implements CategoryScoringService {
                     .build());
         }
 
-        return new NamingAnalysis(inconsistentPaths.isEmpty(), dominantPattern);
+        if (inconsistentPaths.isEmpty()) {
+            data.getStrengths().add("Consistent path naming convention detected: " + dominantPattern);
+        }else {
+            data.setPoints(data.getPoints() + scoringConfig.getValidation().getPath().getPenaltyForMissingCrudOperations());
+            data.getIssues().add(CategoryScore.Issue.builder()
+                    .location("#/paths")
+                    .description(String.format("Found %d paths with inconsistent naming conventions", inconsistentPaths.size()))
+                    .severity(CategoryScore.Severity.LOW)
+                    .suggestion("Consider standardizing path naming conventions to improve API clarity")
+                    .build());
+        }
     }
 
-    private CrudAnalysis analyzeCrudOperations(OpenAPI spec, CategoryScoreData data) {
+    private void analyzeCrudOperations(OpenAPI spec, PathsData data) {
         Map<String, Set<PathItem.HttpMethod>> resourceMethods = new HashMap<>();
 
         // Group methods by resource path
@@ -173,7 +149,7 @@ public class PathsScoringService implements CategoryScoringService {
                             path.endsWith("}")
             ) {
                 data.getIssues().add(CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location(path, "post", "crud"))
+                        .location(String.format("#/paths/%s", path))
                         .description("POST operation found on a path with parameters, which may not be suitable for resource creation")
                         .severity(CategoryScore.Severity.LOW)
                         .suggestion("Consider using POST on a base resource path without parameters")
@@ -188,7 +164,7 @@ public class PathsScoringService implements CategoryScoringService {
                     !path.endsWith("}")
             ) {
                 data.getIssues().add(CategoryScore.Issue.builder()
-                        .location(new CategoryScore.Issue.Location(path, "put-patch-delete", "crud"))
+                        .location(String.format("#/paths/%s", path))
                         .description("PUT, PATCH, or DELETE operation found on a path without parameters, which may not be suitable for resource management")
                         .severity(CategoryScore.Severity.LOW)
                         .suggestion("Consider using these methods on a base resource path with parameters")
@@ -196,22 +172,32 @@ public class PathsScoringService implements CategoryScoringService {
             }
         });
 
-        return new CrudAnalysis(previousSize == data.getIssues().size());
+        if(previousSize == data.getIssues().size()) {
+            data.getStrengths().add("All paths follow proper CRUD operation conventions");
+        } else {
+            data.setPoints(data.getPoints() + scoringConfig.getValidation().getPath().getPenaltyForMissingCrudOperations());
+            data.getIssues().add(CategoryScore.Issue.builder()
+                    .location("#/paths")
+                    .description("Some paths do not follow proper CRUD operation conventions")
+                    .severity(CategoryScore.Severity.MEDIUM)
+                    .suggestion("Review paths to ensure they follow standard RESTful CRUD conventions")
+                    .build());
+        }
     }
 
-    private OverlapAnalysis analyzeOverlappingPaths(List<String> pathNames, CategoryScoreData data) {
+    private void analyzeOverlappingPaths(PathsData data) {
         List<String> overlappingPaths = new ArrayList<>();
 
-        for (int i = 0; i < pathNames.size(); i++) {
-            for (int j = i + 1; j < pathNames.size(); j++) {
-                String path1 = pathNames.get(i);
-                String path2 = pathNames.get(j);
+        for (int i = 0; i < data.getPathNames().size(); i++) {
+            for (int j = i + 1; j < data.getPathNames().size(); j++) {
+                String path1 = data.getPathNames().get(i);
+                String path2 = data.getPathNames().get(j);
 
                 if (pathsOverlap(path1, path2)) {
                     overlappingPaths.add(path1 + " <-> " + path2);
 
                     data.getIssues().add(CategoryScore.Issue.builder()
-                            .location(new CategoryScore.Issue.Location(path1, "all", "overlap"))
+                            .location(String.format("#/paths/%s - #/paths/%s", path1, path2))
                             .description("Path potentially overlaps with " + path2)
                             .severity(CategoryScore.Severity.MEDIUM)
                             .suggestion("Review path structure to ensure no ambiguous routing")
@@ -222,14 +208,26 @@ public class PathsScoringService implements CategoryScoringService {
 
         if (!overlappingPaths.isEmpty()) {
             data.getIssues().add(CategoryScore.Issue.builder()
-                    .location(new CategoryScore.Issue.Location("overall", "all", "overlaps"))
+                    .location("#/paths")
                     .description(String.format("Found %d potential path overlaps", overlappingPaths.size()))
                     .severity(CategoryScore.Severity.MEDIUM)
                     .suggestion("Redesign overlapping paths to have clear, unambiguous routing")
                     .build());
         }
 
-        return new OverlapAnalysis(!overlappingPaths.isEmpty());
+        if (overlappingPaths.isEmpty()) {
+            data.getStrengths().add("No overlapping or ambiguous paths detected");
+        } else {
+            data.setPoints(data.getPoints() - scoringConfig.getValidation().getPath().getPenaltyForRedundantPaths());
+            overlappingPaths.forEach(path ->
+                data.getIssues().add(CategoryScore.Issue.builder()
+                        .location(String.format("#/paths/%s", path))
+                        .description("Path overlaps with another path, which may cause routing issues")
+                        .severity(CategoryScore.Severity.MEDIUM)
+                        .suggestion("Consider redesigning paths to avoid overlaps")
+                        .build())
+            );
+        }
     }
 
     private String detectNamingPattern(String segment) {
